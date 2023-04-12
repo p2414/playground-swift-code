@@ -1,0 +1,83 @@
+
+import AVFoundation
+import Accelerate
+import CorePlot
+
+let fs: Double = 44100
+let T: Double = 10 // Enter duration in seconds
+let f1: Double = 50 // Enter start frequency (Hz)
+let f2: Double = 15000 // Enter end frequency (Hz)
+let nyq: Double = fs/2
+let wave1: Double = 2 * Double.pi * f1
+let wave2: Double = 2 * Double.pi * f2
+let silence: Double = 5
+let t = Array(stride(from: 0, to: T * fs, by: 1))/fs
+let K = T * wave1 / log(wave2 / wave1)
+let L = T / log(wave2 / wave1)
+let sweep = sin(K * (exp(t/L) - 1))
+let amplitudeEnvelope = Array(0..<sweep.count).map{ Double($0) }.map{ $0 / Double(sweep.count) } + Array(repeating: 1, count: sweep.count)
+let inrec = try! AVAudioRecorder(url: URL(fileURLWithPath: "audio.m4a"), settings: [
+    AVFormatIDKey: kAudioFormatAppleLossless,
+    AVEncoderAudioQualityKey : AVAudioQuality.max.rawValue,
+    AVEncoderBitRateKey : 320000,
+    AVNumberOfChannelsKey: 1,
+    AVSampleRateKey: fs
+])
+inrec.record(forDuration: T)
+sound(sweep,fs,24) // Play sound
+sleep(UInt32(T+5))
+sound(sweep,fs,24)
+let rec = try! AVAudioPCMBuffer(url: URL(fileURLWithPath: "audio.m4a")).floatChannelData![0]
+var a = Array(rec)
+a = a.map{ $0 / max(abs(a) / 3) }
+let invsweep = Array(sweep.reversed()).enumerated().map{ (i, x) in x * exp(Double(-i)/L) }
+var b = invsweep
+b = b.map{ $0 / max(abs(b) / 3) }
+var ab = [Double](repeating: 0, count: a.count + b.count - 1)
+for i in 0..<a.count {
+    for j in 0..<b.count {
+        ab[i+j] += a[i] * b[j]
+    }
+}
+ab = ab.map{ $0 / max(abs(ab)) }
+
+// Calculate impulse response
+var impulseResponse = [Double](repeating: 0, count: ab.count)
+var length = vDSP_Length(ab.count)
+var fftSetup = vDSP_create_fftsetup(length, Int32(kFFTRadix2))!
+var splitComplex = DSPDoubleSplitComplex(realp: UnsafeMutablePointer(mutating: ab), 
+                                          imagp: UnsafeMutablePointer(mutating: [Double](repeating: 0.0, count: ab.count)))
+vDSP_fft_zipD(fftSetup, &splitComplex, 1, length, FFTDirection(FFT_FORWARD))
+vDSP_zvabsD(&splitComplex, 1, &impulseResponse, 1, length/2)
+vDSP_destroy_fftsetup(fftSetup)
+
+let N = rec.count
+var X_mags = [Double](repeating: 0, count: N)
+for i in 0..<N {
+    let real = ab[i]
+    let imag = 0.0
+    X_mags[i] = sqrt(pow(real, 2) + pow(imag, 2))
+}
+let bin_vals = Array(0..<N)
+let fax_Hz = bin_vals.map{ $0 * fs / Double(N) }
+let N_2 = Int(ceil(Double(N)/2))
+let plotX = Array(fax_Hz[0..<N_2])
+let plotY = Array(X_mags[0..<N_2]).map{ 10 * log10($0) }
+
+// Calculate impulse response
+let Y = Array(DSP.fft(X: ab, inverse: true))
+let h = Array(Y[0..<N_2])
+
+// Plot impulse response
+let chart = LineChart(frame: CGRect(x: 0, y: 0, width: 600, height: 300))
+var dataEntries = [ChartDataEntry]()
+for i in 0..<h.count {
+    let dataEntry = ChartDataEntry(x: plotX[i], y: h[i])
+    dataEntries.append(dataEntry)
+}
+let lineChartDataSet = LineChartDataSet(entries: dataEntries, label: "Impulse Response")
+let lineChartData = LineChartData(dataSet: lineChartDataSet)
+chart.data = lineChartData
+
+// Display chart
+PlaygroundPage.current.liveView = chart
